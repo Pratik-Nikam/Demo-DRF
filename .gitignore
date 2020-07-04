@@ -1,0 +1,11 @@
+# Vscode #
+/.vscode
+
+# Django #
+*.pyc
+__pycache__
+
+# django migrations #
+**/migrations/**
+!**/migrations
+!**/migrations/__init__.py
