@@ -21,7 +21,7 @@ These instructions will get you a copy of the project up and running on your loc
 
 ### Library Used
 ---
-**P.S**:*For installation of required library or modules refer [requirement.txt](https:demo) file and directly install using following command*
+**P.S**:*For installation of required library or modules refer [requirement.txt](https://github.com/Pratik-Nikam/Demo-DRF/blob/master/requirements.txt) file and directly install using following command*
 		$ pip install -r requirements.txt
 
 ### Prerequisites/Requirements
