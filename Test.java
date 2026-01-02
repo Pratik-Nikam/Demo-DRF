@@ -1,85 +1,79 @@
-package com.yourcompany.health;
+@ConfigurationProperties(prefix = "healthz")
+public class HealthzProperties {
+  private Set<String> critical = Set.of("admin", "moneyMovement");
+  public Set<String> getCritical() { return critical; }
+  public void setCritical(Set<String> critical) { this.critical = critical; }
+}
 
-import org.springframework.boot.actuate.health.*;
-import org.springframework.boot.actuate.health.HealthEndpoint;
-import org.springframework.boot.context.properties.ConfigurationProperties;
-import org.springframework.boot.context.properties.EnableConfigurationProperties;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RestController;
+@Configuration
+@EnableConfigurationProperties(HealthzProperties.class)
+public class HealthzAggregationConfig {
 
-import java.util.*;
+  @Bean
+  public HealthEndpointWebExtension healthEndpointWebExtension(
+      HealthContributorRegistry registry,
+      HealthEndpointGroups groups,
+      HealthzProperties props
+  ) {
+    // keep Boot’s default slow threshold if you don’t care, or inject it via config
+    return new CriticalOnlyAggregationHealthWebExtension(registry, groups, Duration.ofSeconds(3), props);
+  }
 
-@RestController
-@EnableConfigurationProperties(HealthzController.HealthzProperties.class)
-public class HealthzController {
+  static final class CriticalOnlyAggregationHealthWebExtension extends HealthEndpointWebExtension {
 
-    private final HealthEndpoint healthEndpoint;
     private final HealthzProperties props;
 
-    public HealthzController(HealthEndpoint healthEndpoint, HealthzProperties props) {
-        this.healthEndpoint = healthEndpoint;
-        this.props = props;
+    CriticalOnlyAggregationHealthWebExtension(
+        HealthContributorRegistry registry,
+        HealthEndpointGroups groups,
+        Duration slowIndicatorLoggingThreshold,
+        HealthzProperties props
+    ) {
+      super(registry, groups, slowIndicatorLoggingThreshold);
+      this.props = props;
     }
 
-    @GetMapping("/healthz")
-    public Map<String, Object> healthz() {
-        HealthComponent root = healthEndpoint.health();
+    @Override
+    protected HealthComponent aggregateContributions(
+        ApiVersion apiVersion,
+        Map<String, HealthComponent> contributions,
+        StatusAggregator statusAggregator,
+        boolean showComponents,
+        Set<String> groupNames
+    ) {
+      // 1) compute overall status ONLY from critical components
+      var criticalStatuses = contributions.entrySet().stream()
+          .filter(e -> props.getCritical().contains(e.getKey()))
+          .map(e -> e.getValue().getStatus())
+          .toList();
 
-        if (!(root instanceof SystemHealth sys)) {
-            // fallback (rare)
-            return Map.of("status", root.getStatus().getCode());
-        }
+      Status overall = statusAggregator.getAggregateStatus(criticalStatuses);
 
-        Map<String, HealthComponent> components = sys.getComponents();
+      // 2) still return ALL components with their real statuses
+      Map<String, HealthComponent> components = showComponents ? contributions : Map.of();
 
-        // Build response components (actuator-like, includes db)
-        Map<String, Object> outComponents = new LinkedHashMap<>();
-        for (Map.Entry<String, HealthComponent> e : components.entrySet()) {
-            String id = e.getKey();
-            HealthComponent hc = e.getValue();
+      return new AggregatedHealth(overall, components);
+    }
+  }
 
-            Map<String, Object> node = new LinkedHashMap<>();
-            node.put("status", hc.getStatus().getCode());
+  // Minimal HealthComponent that serializes like:
+  // { "status": "...", "components": { ... } }
+  static final class AggregatedHealth extends HealthComponent {
+    private final Status status;
+    private final Map<String, HealthComponent> components;
 
-            // Include details if available
-            if (hc instanceof Health h && h.getDetails() != null && !h.getDetails().isEmpty()) {
-                node.put("details", h.getDetails());
-            }
-
-            outComponents.put(id, node);
-        }
-
-        // Overall: DOWN only if ANY critical is not UP
-        boolean criticalDown = props.getCriticalServices().stream()
-                .map(components::get)
-                .filter(Objects::nonNull)
-                .anyMatch(hc -> !Status.UP.equals(hc.getStatus()));
-
-        String overall = criticalDown ? Status.DOWN.getCode() : Status.UP.getCode();
-
-        Map<String, Object> response = new LinkedHashMap<>();
-        response.put("status", overall);
-        response.put("components", outComponents);
-        return response;
+    AggregatedHealth(Status status, Map<String, HealthComponent> components) {
+      this.status = status;
+      this.components = components;
     }
 
-    // ---------- static config / properties (nested) ----------
-
-    @ConfigurationProperties(prefix = "healthz")
-    public static class HealthzProperties {
-        /**
-         * Must match component IDs in the actuator health "components" map.
-         * Examples: db, admin, money-movement, platform, diskSpace, ping, etc.
-         */
-        private List<String> criticalServices = new ArrayList<>();
-
-        public List<String> getCriticalServices() {
-            return criticalServices;
-        }
-
-        public void setCriticalServices(List<String> criticalServices) {
-            this.criticalServices = criticalServices;
-        }
+    @Override
+    public Status getStatus() {
+      return status;
     }
+
+    public Map<String, HealthComponent> getComponents() {
+      return components;
+    }
+  }
 }
