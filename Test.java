@@ -1,79 +1,47 @@
-@ConfigurationProperties(prefix = "healthz")
-public class HealthzProperties {
-  private Set<String> critical = Set.of("admin", "moneyMovement");
-  public Set<String> getCritical() { return critical; }
-  public void setCritical(Set<String> critical) { this.critical = critical; }
-}
+@ControllerAdvice
+static class HealthzResponseShapeAdvice implements ResponseBodyAdvice<Object> {
 
-@Configuration
-@EnableConfigurationProperties(HealthzProperties.class)
-public class HealthzAggregationConfig {
-
-  @Bean
-  public HealthEndpointWebExtension healthEndpointWebExtension(
-      HealthContributorRegistry registry,
-      HealthEndpointGroups groups,
-      HealthzProperties props
-  ) {
-    // keep Boot’s default slow threshold if you don’t care, or inject it via config
-    return new CriticalOnlyAggregationHealthWebExtension(registry, groups, Duration.ofSeconds(3), props);
+  @Override
+  public boolean supports(MethodParameter returnType,
+                          Class<? extends HttpMessageConverter<?>> converterType) {
+    return true; // filter by path in beforeBodyWrite
   }
 
-  static final class CriticalOnlyAggregationHealthWebExtension extends HealthEndpointWebExtension {
+  @Override
+  @SuppressWarnings("unchecked")
+  public Object beforeBodyWrite(Object body,
+                                MethodParameter returnType,
+                                MediaType selectedContentType,
+                                Class<? extends HttpMessageConverter<?>> selectedConverterType,
+                                ServerHttpRequest request,
+                                ServerHttpResponse response) {
 
-    private final HealthzProperties props;
+    // Only works for MVC (Servlet)
+    if (!(request instanceof ServletServerHttpRequest servletReq)) return body;
 
-    CriticalOnlyAggregationHealthWebExtension(
-        HealthContributorRegistry registry,
-        HealthEndpointGroups groups,
-        Duration slowIndicatorLoggingThreshold,
-        HealthzProperties props
-    ) {
-      super(registry, groups, slowIndicatorLoggingThreshold);
-      this.props = props;
-    }
+    HttpServletRequest http = servletReq.getServletRequest();
+    String uri = http.getRequestURI();
+    if (uri == null) return body;
 
-    @Override
-    protected HealthComponent aggregateContributions(
-        ApiVersion apiVersion,
-        Map<String, HealthComponent> contributions,
-        StatusAggregator statusAggregator,
-        boolean showComponents,
-        Set<String> groupNames
-    ) {
-      // 1) compute overall status ONLY from critical components
-      var criticalStatuses = contributions.entrySet().stream()
-          .filter(e -> props.getCritical().contains(e.getKey()))
-          .map(e -> e.getValue().getStatus())
-          .toList();
+    // Adjust if your endpoint is exactly /healthz or /health-z
+    if (!(uri.endsWith("/healthz") || uri.endsWith("/health-z"))) return body;
 
-      Status overall = statusAggregator.getAggregateStatus(criticalStatuses);
+    // Only rewrite Map-shaped JSON
+    if (!(body instanceof Map<?, ?> raw)) return body;
 
-      // 2) still return ALL components with their real statuses
-      Map<String, HealthComponent> components = showComponents ? contributions : Map.of();
+    Map<String, Object> root = new LinkedHashMap<>();
+    raw.forEach((k, v) -> root.put(String.valueOf(k), v));
 
-      return new AggregatedHealth(overall, components);
-    }
-  }
+    Object detailsObj = root.get("details");
+    if (!(detailsObj instanceof Map<?, ?> details)) return body;
 
-  // Minimal HealthComponent that serializes like:
-  // { "status": "...", "components": { ... } }
-  static final class AggregatedHealth extends HealthComponent {
-    private final Status status;
-    private final Map<String, HealthComponent> components;
+    Object compsObj = ((Map<String, Object>) details).get("components");
+    if (compsObj == null) return body;
 
-    AggregatedHealth(Status status, Map<String, HealthComponent> components) {
-      this.status = status;
-      this.components = components;
-    }
+    // Move details.components -> top-level components
+    root.put("components", compsObj);
+    root.remove("details");
 
-    @Override
-    public Status getStatus() {
-      return status;
-    }
-
-    public Map<String, HealthComponent> getComponents() {
-      return components;
-    }
+    return root;
   }
 }
