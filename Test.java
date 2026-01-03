@@ -1,47 +1,110 @@
-@ControllerAdvice
-static class HealthzResponseShapeAdvice implements ResponseBodyAdvice<Object> {
+package com.yourpkg; // keep your existing package
 
-  @Override
-  public boolean supports(MethodParameter returnType,
-                          Class<? extends HttpMessageConverter<?>> converterType) {
-    return true; // filter by path in beforeBodyWrite
+import java.time.Duration;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+import org.springframework.boot.actuate.endpoint.ApiVersion;
+import org.springframework.boot.actuate.health.HealthComponent;
+import org.springframework.boot.actuate.health.HealthEndpointWebExtension;
+import org.springframework.boot.actuate.health.HealthContributorRegistry;
+import org.springframework.boot.actuate.health.HealthEndpointGroups;
+import org.springframework.boot.actuate.health.Status;
+import org.springframework.boot.actuate.health.StatusAggregator;
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+@EnableConfigurationProperties(HealthzAggregationConfig.HealthzProperties.class)
+public class HealthzAggregationConfig {
+
+  @Bean
+  public HealthEndpointWebExtension healthEndpointWebExtension(
+      HealthContributorRegistry registry,
+      HealthEndpointGroups groups,
+      HealthzProperties props
+  ) {
+    // keep your Duration / threshold as you already had (3 sec etc.)
+    return new CriticalOnlyAggregationHealthWebExtension(registry, groups, Duration.ofSeconds(3), props);
   }
 
-  @Override
-  @SuppressWarnings("unchecked")
-  public Object beforeBodyWrite(Object body,
-                                MethodParameter returnType,
-                                MediaType selectedContentType,
-                                Class<? extends HttpMessageConverter<?>> selectedConverterType,
-                                ServerHttpRequest request,
-                                ServerHttpResponse response) {
+  @ConfigurationProperties(prefix = "healthz")
+  public static class HealthzProperties {
+    private Set<String> critical = Set.of();
 
-    // Only works for MVC (Servlet)
-    if (!(request instanceof ServletServerHttpRequest servletReq)) return body;
+    public Set<String> getCritical() {
+      return critical;
+    }
 
-    HttpServletRequest http = servletReq.getServletRequest();
-    String uri = http.getRequestURI();
-    if (uri == null) return body;
+    public void setCritical(Set<String> critical) {
+      this.critical = critical;
+    }
+  }
 
-    // Adjust if your endpoint is exactly /healthz or /health-z
-    if (!(uri.endsWith("/healthz") || uri.endsWith("/health-z"))) return body;
+  static final class CriticalOnlyAggregationHealthWebExtension extends HealthEndpointWebExtension {
 
-    // Only rewrite Map-shaped JSON
-    if (!(body instanceof Map<?, ?> raw)) return body;
+    private final HealthzProperties props;
 
-    Map<String, Object> root = new LinkedHashMap<>();
-    raw.forEach((k, v) -> root.put(String.valueOf(k), v));
+    CriticalOnlyAggregationHealthWebExtension(
+        HealthContributorRegistry registry,
+        HealthEndpointGroups groups,
+        Duration slowIndicatorLoggingThreshold,
+        HealthzProperties props
+    ) {
+      super(registry, groups, slowIndicatorLoggingThreshold);
+      this.props = props;
+    }
 
-    Object detailsObj = root.get("details");
-    if (!(detailsObj instanceof Map<?, ?> details)) return body;
+    @Override
+    protected HealthComponent aggregateContributions(
+        ApiVersion apiVersion,
+        Map<String, HealthComponent> contributions,
+        StatusAggregator statusAggregator,
+        boolean showComponents,
+        Set<String> groupNames
+    ) {
+      // 1) overall status ONLY from critical components
+      Set<Status> criticalStatuses = contributions.entrySet().stream()
+          .filter(e -> props.getCritical() != null && props.getCritical().contains(e.getKey()))
+          .map(e -> e.getValue().getStatus())
+          .collect(Collectors.toSet());
 
-    Object compsObj = ((Map<String, Object>) details).get("components");
-    if (compsObj == null) return body;
+      Status overall = criticalStatuses.isEmpty()
+          ? statusAggregator.getAggregateStatus(
+              contributions.values().stream().map(HealthComponent::getStatus).collect(Collectors.toSet())
+            )
+          : statusAggregator.getAggregateStatus(criticalStatuses);
 
-    // Move details.components -> top-level components
-    root.put("components", compsObj);
-    root.remove("details");
+      // 2) still return ALL components with their real statuses (UP/DOWN)
+      Map<String, HealthComponent> components = showComponents ? contributions : Map.of();
 
-    return root;
+      // IMPORTANT: do NOT use Health.withDetail(...) or it will become "details"
+      // Return a component that serializes to { "status": ..., "components": ... }
+      return new HealthzAggregate(overall, components);
+    }
+  }
+
+  static final class HealthzAggregate implements HealthComponent {
+
+    private final Status status;
+    private final Map<String, HealthComponent> components;
+
+    HealthzAggregate(Status status, Map<String, HealthComponent> components) {
+      this.status = status;
+      this.components = components;
+    }
+
+    @Override
+    public Status getStatus() {
+      return status;
+    }
+
+    // Jackson will serialize this as top-level "components"
+    public Map<String, HealthComponent> getComponents() {
+      return components;
+    }
   }
 }
